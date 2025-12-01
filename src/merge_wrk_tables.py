@@ -1,276 +1,229 @@
-# -*- coding: utf-8 -*-
 import sys
 import re
 import pandas as pd
-from pathlib import Path
+import os
 
-sys.path.append(str(Path(__file__).resolve().parent))
+sys.path.append('..')
 import settings as cfg
 
-print(f"[settings] Project root: {cfg.ROOT}")
+print(f"работаем в папке: {cfg.ROOT}")
 
-# ==========================================================
-# 1. ЗАГРУЗКА
-# ==========================================================
-tables = {
+# 1. загрузка файлов
+files = {
     "flights": "wrk_flights.csv",
     "sirena": "airlines_sirena_export.csv",
     "sirena_users": "airlines_sirena_export_users.csv",
     "users": "wrk_users.csv"
 }
-dfs = {}
-for name, file in tables.items():
-    path = cfg.STAGING / file
-    dfs[name] = pd.read_csv(path, low_memory=False)
-    print(f"✅ {name}: {len(dfs[name])} строк, {len(dfs[name].columns)} колонок")
 
-flights, sirena, sirena_users, users = dfs["flights"], dfs["sirena"], dfs["sirena_users"], dfs["users"]
+flights = pd.read_csv(os.path.join(cfg.STAGING, files["flights"]), low_memory=False)
+sirena = pd.read_csv(os.path.join(cfg.STAGING, files["sirena"]), low_memory=False)
+sirena_users = pd.read_csv(os.path.join(cfg.STAGING, files["sirena_users"]), low_memory=False)
+users = pd.read_csv(os.path.join(cfg.STAGING, files["users"]), low_memory=False)
 
-# ==========================================================
-# 2. ОЧИСТКА И НОРМАЛИЗАЦИЯ
-# ==========================================================
-for df_name, df in dfs.items():
-    df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", '')
+print(f"флайтс: {len(flights)}")
+print(f"сирена: {len(sirena)}")
+print(f"сирена юзерс: {len(sirena_users)}")
+print(f"юзерс: {len(users)}")
+
+# 2. чистим колонки
+def clean_df(df):
+    df.columns = [c.strip().replace('"', '').replace("'", '') for c in df.columns]
     for col in df.columns:
-        df[col] = df[col].astype(str).str.strip().replace("nan", "")
-    print(f"🧩 {df_name} columns: {df.columns[:8].tolist()}...")
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).str.strip()
+            df[col] = df[col].replace('nan', '')
+    return df
 
-def normalize_doc(s):
-    """Убираем нецифры и пробелы в документе."""
-    if not isinstance(s, str): return ""
-    return re.sub(r"\D", "", s or "")
+flights = clean_df(flights)
+sirena = clean_df(sirena)
+sirena_users = clean_df(sirena_users)
+users = clean_df(users)
 
-for d in [sirena, sirena_users, users]:
-    if "document" in d.columns:
-        d["document_norm"] = d["document"].map(normalize_doc)
-    elif "travel_doc" in d.columns:
-        d["document_norm"] = d["travel_doc"].map(normalize_doc)
+print("после чистки")
+print(flights.columns[:5].tolist())
 
-# ==========================================================
-# 3. MERGE flights ↔ sirena
-# ==========================================================
-print("\n🔗 Шаг 1: flights ↔ sirena по sirena_id → id")
+# 3. нормализация документов
+def fix_doc(x):
+    if not isinstance(x, str):
+        return ''
+    return re.sub(r'\D', '', x)
 
-eticket_col = None
-for c in sirena.columns:
-    if re.search(r"ticket", c, re.IGNORECASE):
-        eticket_col = c
+for df in [sirena, sirena_users, users]:
+    if 'document' in df.columns:
+        df['document_norm'] = df['document'].apply(fix_doc)
+    elif 'travel_doc' in df.columns:
+        df['document_norm'] = df['travel_doc'].apply(fix_doc)
+
+# 4. мердж флайтс и сирена
+print("\nмерджим флайтс и сирену")
+ticket_col = None
+for col in sirena.columns:
+    if 'ticket' in col.lower():
+        ticket_col = col
         break
 
-if eticket_col:
-    print(f"🔍 Найдено поле для билета: {eticket_col}")
+if ticket_col:
+    print(f"билеты в колонке {ticket_col}")
 else:
-    print("⚠️ В sirena не найдено поле с билетом (eticket / ticket_number).")
-    eticket_col = None
+    print("нет колонки с билетами")
+    ticket_col = ''
 
-# включаем pax_birth_data
-cols_for_merge = [
-    "id","departure_date","departure_time","arrival_date","arrival_time",
-    "fare","baggage","meal","trv_cls","travel_doc","agent_info",
-    "pax_name","document_norm","pax_birth_data"
-]
-if eticket_col and eticket_col not in cols_for_merge:
-    cols_for_merge.append(eticket_col)
+cols_to_use = ["id","departure_date","departure_time","arrival_date","arrival_time",
+               "fare","baggage","meal","trv_cls","travel_doc","agent_info",
+               "pax_name","document_norm","pax_birth_data"]
 
-cols_existing = [c for c in cols_for_merge if c in sirena.columns]
+if ticket_col and ticket_col not in cols_to_use:
+    cols_to_use.append(ticket_col)
 
-merged = flights.merge(
-    sirena[cols_existing],
-    left_on="sirena_id",
-    right_on="id",
-    how="left"
-)
+cols_to_use = [c for c in cols_to_use if c in sirena.columns]
 
-if eticket_col and eticket_col in merged.columns:
-    merged["eticket"] = merged[eticket_col]
+merged = pd.merge(flights, sirena[cols_to_use], left_on="sirena_id", right_on="id", how="left")
+
+if ticket_col and ticket_col in merged.columns:
+    merged['eticket'] = merged[ticket_col]
 else:
-    print(f"⚠️ Колонка {eticket_col or 'eticket'} не найдена после merge, создаём пустую.")
-    merged["eticket"] = ""
+    merged['eticket'] = ''
 
-print(f"✅ После merge 1: {len(merged)} строк, заполнено eticket: {(merged['eticket'] != '').mean():.1%}")
+print(f"после мерджа: {len(merged)} строк")
 
-# ==========================================================
-# 4. MERGE sirena ↔ sirena_users (имена + дата)
-# ==========================================================
-print("\n🔗 Шаг 2: sirena ↔ sirena_users по pax_birth_data и именам")
+# 5. добавляем имена из sirena_users
+print("\nдобавляем имена")
 
-# определяем реальные поля
-birth_left = next((c for c in merged.columns if "birth" in c.lower()), None)
-birth_right = next((c for c in sirena_users.columns if "birth" in c.lower()), None)
-
-if not birth_left:
-    print("⚠️ В merged нет поля с датой рождения (birth_date / pax_birth_data).")
-else:
-    print(f"📆 Поле даты рождения найдено: {birth_left}")
+# ищем колонки с датой рождения
+birth_col1 = None
+birth_col2 = None
+for col in merged.columns:
+    if 'birth' in col.lower():
+        birth_col1 = col
+        break
+for col in sirena_users.columns:
+    if 'birth' in col.lower():
+        birth_col2 = col
+        break
 
 # нормализуем имена
-def normalize_name(s):
-    if not isinstance(s, str): return ""
-    s = re.sub(r"[^A-Za-zА-Яа-яЁё ]", "", s)
-    return s.strip().lower()
+def fix_name(n):
+    if not isinstance(n, str):
+        return ''
+    n = re.sub(r'[^A-Za-zА-Яа-я ]', '', n)
+    return n.strip().lower()
 
-if "pax_name" in merged.columns:
-    merged["pax_last"]  = merged["pax_name"].map(lambda x: x.split()[0] if isinstance(x, str) and len(x.split()) > 0 else "")
-    merged["pax_first"] = merged["pax_name"].map(lambda x: x.split()[1] if isinstance(x, str) and len(x.split()) > 1 else "")
-    merged["pax_last_norm"]  = merged["pax_last"].map(normalize_name)
-    merged["pax_first_norm"] = merged["pax_first"].map(normalize_name)
+if 'pax_name' in merged.columns:
+    merged['pax_last'] = merged['pax_name'].apply(lambda x: x.split()[0] if isinstance(x, str) and x.split() else '')
+    merged['pax_first'] = merged['pax_name'].apply(lambda x: x.split()[1] if isinstance(x, str) and len(x.split()) > 1 else '')
+    merged['pax_last_norm'] = merged['pax_last'].apply(fix_name)
+    merged['pax_first_norm'] = merged['pax_first'].apply(fix_name)
 
-sirena_users["last_name_norm"]  = sirena_users["last_name"].map(normalize_name)
-sirena_users["first_name_norm"] = sirena_users["first_name"].map(normalize_name)
+sirena_users['last_name_norm'] = sirena_users['last_name'].apply(fix_name)
+sirena_users['first_name_norm'] = sirena_users['first_name'].apply(fix_name)
 
-# объединяем
-if birth_left and birth_right:
-    print(f"🔁 Объединяем по: фамилии + имени + {birth_left}")
-    merged = merged.merge(
-        sirena_users[
-            ["first_name","last_name","second_name","last_name_norm","first_name_norm",birth_right]
-        ],
-        left_on=["pax_last_norm","pax_first_norm",birth_left],
-        right_on=["last_name_norm","first_name_norm",birth_right],
-        how="left",
-        suffixes=("", "_su")
-    )
-    merged["match_reason"] = "name+birth"
+# мердж
+if birth_col1 and birth_col2:
+    print(f"мердж по имени и дате рождения {birth_col1}")
+    merged = pd.merge(merged, sirena_users[['first_name','last_name','second_name','last_name_norm','first_name_norm',birth_col2]], 
+                     left_on=['pax_last_norm','pax_first_norm',birth_col1],
+                     right_on=['last_name_norm','first_name_norm',birth_col2],
+                     how='left')
+    merged['match_reason'] = 'name+birth'
 else:
-    print("⚠️ birth_date не найдено, объединяем только по имени/фамилии")
-    merged = merged.merge(
-        sirena_users[
-            ["first_name","last_name","second_name","last_name_norm","first_name_norm"]
-        ],
-        left_on=["pax_last_norm","pax_first_norm"],
-        right_on=["last_name_norm","first_name_norm"],
-        how="left",
-        suffixes=("", "_su")
-    )
-    merged["match_reason"] = "name_only"
+    print("мердж только по имени")
+    merged = pd.merge(merged, sirena_users[['first_name','last_name','second_name','last_name_norm','first_name_norm']],
+                     left_on=['pax_last_norm','pax_first_norm'],
+                     right_on=['last_name_norm','first_name_norm'],
+                     how='left')
+    merged['match_reason'] = 'name_only'
 
-found_names = (merged["first_name"] != "").mean()
-print(f"✅ После merge 2: {len(merged)} строк, имена найдены: {found_names:.1%}")
-print("📋 Примеры найденных пользователей:")
-cols_preview = ["first_name", "last_name"]
-if birth_left and birth_left in merged.columns:
-    cols_preview.append(birth_left)
-print(merged.loc[merged['first_name'] != '', cols_preview].head(10).to_string(index=False))
+print(f"нашли имена: {(merged['first_name'] != '').mean():.1%}")
 
-# ==========================================================
-# 5. MERGE с wrk_users (по document_norm + birth)
-# ==========================================================
-print("\n🔗 Шаг 3: добавляем wrk_users (sex, ГОСТ-имена)")
-birth_left = next((c for c in merged.columns if "birth" in c.lower()), None)
-birth_right = next((c for c in users.columns if "birth" in c.lower()), None)
+# 6. добавляем users
+print("\nдобавляем users")
+birth_col1 = None
+birth_col2 = None
+for col in merged.columns:
+    if 'birth' in col.lower():
+        birth_col1 = col
+        break
+for col in users.columns:
+    if 'birth' in col.lower():
+        birth_col2 = col
+        break
 
-if not birth_left:
-    print("⚠️ В merged нет поля с датой рождения, объединяем только по документу.")
-if not birth_right:
-    print("⚠️ В users нет поля с датой рождения, объединяем только по документу.")
+left_keys = ['document_norm']
+right_keys = ['document_norm']
+if birth_col1 and birth_col2:
+    left_keys.append(birth_col1)
+    right_keys.append(birth_col2)
 
-keys_left = ["document_norm"]
-keys_right = ["document_norm"]
-if birth_left and birth_right:
-    keys_left.append(birth_left)
-    keys_right.append(birth_right)
-    print(f"🔁 Объединяем по: {keys_left}")
-else:
-    print("🔁 Объединяем только по документу")
+merged = pd.merge(merged, users[['first_name_v2','last_name_v2','sex','document_norm'] + ([birth_col2] if birth_col2 else [])],
+                 left_on=left_keys, right_on=right_keys, how='left', suffixes=('', '_wrk'))
 
-merged = merged.merge(
-    users[["first_name_v2","last_name_v2","sex","document_norm"] + ([birth_right] if birth_right else [])],
-    left_on=keys_left,
-    right_on=keys_right,
-    how="left",
-    suffixes=("", "_wrk")
-)
+print(f"пол заполнен: {(merged['sex'] != '').mean():.1%}")
 
-print(f"✅ После merge 3: {len(merged)} строк, пол заполнен: {(merged['sex'] != '').mean():.1%}")
+# 7. финальные имена
+print("\nфинальные имена")
 
-# ==========================================================
-# 7. ВОССТАНОВЛЕНИЕ ИМЁН С ПРИОРИТЕТОМ И ТРАНСЛИТЕРАЦИЕЙ
-# ==========================================================
-print("\n🧩 Расширенное восстановление имён (приоритет wrk_users > sirena_users > pax_name)")
-
-try:
-    from unidecode import unidecode
-except ImportError:
-    unidecode = None
-
-def normalize_case(s):
-    """Приведение регистра и транслитерация."""
+def fix_case(s):
     if not isinstance(s, str) or not s.strip():
-        return ""
+        return ''
     s = s.strip().capitalize()
-    if re.search(r"[А-Яа-яЁё]", s):
-        s = unidecode(s) if unidecode else s
+    if re.search(r'[А-Яа-я]', s):
+        try:
+            from unidecode import unidecode
+            s = unidecode(s)
+        except:
+            pass
     return s
 
-def coalesce(*values):
-    """Берёт первое непустое значение."""
-    for v in values:
+def get_first(*args):
+    for v in args:
         if isinstance(v, str) and v.strip():
             return v.strip()
-    return ""
+    return ''
 
-# если остались старые first_name_* — удаляем дубликаты
-for col in ["first_name", "last_name"]:
-    if isinstance(merged.get(col), pd.DataFrame):
-        merged[col] = merged[col].iloc[:, 0]
+merged['first_name_final'] = merged.apply(lambda r: get_first(
+    r.get('first_name_v2', ''),
+    r.get('first_name', ''),
+    r.get('pax_first', '')
+), axis=1)
 
-# создаём финальные имена с приоритетом wrk_users > sirena_users > pax_name
-merged["first_name_final"] = merged.apply(
-    lambda r: coalesce(
-        r.get("first_name_v2", ""),
-        r.get("first_name_su", ""),
-        r.get("first_name", ""),
-        r.get("pax_first", "")
-    ),
-    axis=1
-)
+merged['last_name_final'] = merged.apply(lambda r: get_first(
+    r.get('last_name_v2', ''),
+    r.get('last_name', ''),
+    r.get('pax_last', '')
+), axis=1)
 
-merged["last_name_final"] = merged.apply(
-    lambda r: coalesce(
-        r.get("last_name_v2", ""),
-        r.get("last_name_su", ""),
-        r.get("last_name", ""),
-        r.get("pax_last", "")
-    ),
-    axis=1
-)
+merged['first_name_final'] = merged['first_name_final'].apply(fix_case)
+merged['last_name_final'] = merged['last_name_final'].apply(fix_case)
 
-merged["first_name_final"] = merged["first_name_final"].map(normalize_case)
-merged["last_name_final"]  = merged["last_name_final"].map(normalize_case)
+if 'first_name' in merged.columns:
+    merged.drop('first_name', axis=1, inplace=True)
+if 'last_name' in merged.columns:
+    merged.drop('last_name', axis=1, inplace=True)
 
-# перезаписываем поля окончательно
-merged.drop(columns=[c for c in merged.columns if c in ["first_name","last_name"]], inplace=True, errors="ignore")
-merged.rename(columns={"first_name_final": "first_name", "last_name_final": "last_name"}, inplace=True)
+merged.rename(columns={'first_name_final': 'first_name', 'last_name_final': 'last_name'}, inplace=True)
 
-# --- вычисляем долю непустых имён ---
-mask = merged["first_name"].astype(str).str.strip() != ""
-filled_names_ratio = mask.mean()
-print(f"✅ После восстановления имён: {filled_names_ratio:.1%}")
+print(f"заполнено имён: {(merged['first_name'] != '').mean():.1%}")
 
+# 8. статистика
+print("\nстатистика:")
+fields = ['first_name','last_name','sex','pax_birth_data','document_norm','fare','baggage','agent_info']
+for f in fields:
+    if f in merged.columns:
+        filled = (merged[f] != '').mean()
+        print(f"{f}: {filled:.1%}")
 
-# ==========================================================
-# 8. СТАТИСТИКА
-# ==========================================================
-def stat(field): return f"{(merged[field] != '').mean():.1%}" if field in merged else "—"
-print("\n📊 Краткая статистика заполненности:")
-for f in ["first_name","last_name","sex","pax_birth_data","document_norm","fare","baggage","agent_info"]:
-    print(f"   {f:15}: {stat(f)}")
+# 9. сохранение
+output_cols = ["flight_code","flight_date","departure","arrival",
+               "departure_date","departure_time","arrival_date","arrival_time",
+               "fare","baggage","meal","trv_cls","agent_info",
+               "first_name","last_name","second_name","sex","pax_birth_data","document_norm","match_reason"]
 
-# ==========================================================
-# 9. СОХРАНЕНИЕ
-# ==========================================================
-cols = [
-    "flight_code","flight_date","departure","arrival",
-    "departure_date","departure_time","arrival_date","arrival_time",
-    "fare","baggage","meal","trv_cls","agent_info",
-    "first_name","last_name","second_name","sex","pax_birth_data","document_norm","match_reason"
-]
-cols = [c for c in cols if c in merged.columns]
+output_cols = [c for c in output_cols if c in merged.columns]
 
-out = cfg.STAGING / "merged_all_detailed.csv"
-merged[cols].fillna("").to_csv(out, index=False, encoding="utf-8")
+out_path = os.path.join(cfg.STAGING, "merged_all_detailed.csv")
+merged[output_cols].fillna('').to_csv(out_path, index=False, encoding='utf-8')
 
-print(f"\n💾 Сохранено → {out}")
-print(f"📈 Всего строк: {len(merged)}")
-print("📊 Пример строк:")
-print(merged[cols].head(8).to_string(index=False))
+print(f"\nсохранено в {out_path}")
+print(f"всего строк: {len(merged)}")
+print(merged[output_cols].head(3))
