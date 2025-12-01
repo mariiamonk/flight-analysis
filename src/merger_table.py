@@ -4,117 +4,142 @@ import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-# ==================================================
-# 0. ЗАГРУЗКА
-# ==================================================
+# загружаем данные
 df = pd.read_csv(r"/home/mariia/Загрузки/Telegram Desktop/AI2/data_staging/merged_all_detailed.csv", low_memory=False)
-print(f"✅ Загружено {len(df):,} строк, {len(df.columns)} колонок")
+print(f"загрузили {len(df)} строк")
 
-# Приведение типов
-df["flight_date"] = pd.to_datetime(df["flight_date"], errors="coerce")
+# дату в нормальный формат
+df["flight_date"] = pd.to_datetime(df["flight_date"])
 
-# ==================================================
-# 1. ГРУППИРОВКА ПО ЧЕЛОВЕКУ (а не по документу)
-# ==================================================
+# группируем по людям
 grouped = df.groupby(["first_name", "last_name", "pax_birth_data"])
 
-# --- Базовые метрики ---
+# считаем базовые метрики
 agg = grouped.agg(
     n_flights_total=("flight_code", "count"),
     n_unique_documents=("document_norm", "nunique"),
-    n_unique_routes=("flight_code", lambda x: len(set(zip(df.loc[x.index, "departure"], df.loc[x.index, "arrival"])))),
-    n_unique_agents=("agent_info", "nunique"),
-    baggage_ratio=("baggage", lambda x: (x != "").mean())
+    n_unique_agents=("agent_info", "nunique")
 ).reset_index()
 
-# --- Временные интервалы между рейсами ---
+# уникальные маршруты
+def count_routes(x):
+    routes = set()
+    for idx in x.index:
+        dep = df.loc[idx, "departure"]
+        arr = df.loc[idx, "arrival"]
+        routes.add((dep, arr))
+    return len(routes)
+
+agg["n_unique_routes"] = grouped["flight_code"].apply(count_routes).values
+
+# багаж
+agg["baggage_ratio"] = grouped["baggage"].apply(lambda x: (x != "").mean()).values
+
+# время между рейсами
 df_sorted = df.sort_values(["first_name", "last_name", "pax_birth_data", "flight_date"])
 df_sorted["gap_days"] = df_sorted.groupby(["first_name", "last_name", "pax_birth_data"])["flight_date"].diff().dt.days
 
-gap_stats = (
-    df_sorted.groupby(["first_name", "last_name", "pax_birth_data"])["gap_days"]
-    .agg(mean_time_between_flights="mean", min_time_between_flights="min")
-    .reset_index()
-)
+gap_stats = df_sorted.groupby(["first_name", "last_name", "pax_birth_data"])["gap_days"].agg(
+    mean_time_between_flights="mean",
+    min_time_between_flights="min"
+).reset_index()
 
-# Присоединяем интервалы обратно к agg
 agg = agg.merge(gap_stats, on=["first_name", "last_name", "pax_birth_data"], how="left")
 
-# --- Активность во времени ---
-agg["days_active"] = grouped["flight_date"].apply(
-    lambda x: (x.max() - x.min()).days if len(x.dropna()) > 1 else 0
-).values
+# активность
+def get_days_active(x):
+    if len(x) > 1:
+        return (x.max() - x.min()).days
+    return 0
+
+agg["days_active"] = grouped["flight_date"].apply(get_days_active).values
 agg["flights_per_month"] = agg["n_flights_total"] / ((agg["days_active"] / 30).replace(0, 1))
 
-# --- Доля пропусков по ключевым полям ---
-def calc_missing_ratio(subdf):
-    key_fields = ["fare", "baggage", "agent_info"]
-    existing = [f for f in key_fields if f in subdf.columns]
-    if not existing:
-        return np.nan
-    return (subdf[existing] == "").mean().mean()
+# пропуски в данных
+def calc_missing(subdf):
+    missing = 0
+    if "fare" in subdf.columns:
+        missing += (subdf["fare"] == "").mean()
+    if "baggage" in subdf.columns:
+        missing += (subdf["baggage"] == "").mean()
+    if "agent_info" in subdf.columns:
+        missing += (subdf["agent_info"] == "").mean()
+    return missing / 3
 
-agg["missing_ratio"] = grouped.apply(calc_missing_ratio).values
+agg["missing_ratio"] = grouped.apply(calc_missing).values
 
-# --- Частота маршрутов и агентов ---
-route_counts = df.groupby(["departure", "arrival"]).size().rename("route_freq")
-df = df.merge(route_counts, on=["departure", "arrival"], how="left")
+# популярность маршрутов
+route_counts = {}
+for _, row in df.iterrows():
+    route = (row["departure"], row["arrival"])
+    route_counts[route] = route_counts.get(route, 0) + 1
 
+route_popularity = []
+for name, group in grouped:
+    pop_sum = 0
+    count = 0
+    for idx in group.index:
+        route = (df.loc[idx, "departure"], df.loc[idx, "arrival"])
+        pop_sum += route_counts.get(route, 0)
+        count += 1
+    route_popularity.append(pop_sum / count if count > 0 else 0)
+
+agg["avg_route_popularity"] = route_popularity
+
+# популярность агентов
 agent_counts = df["agent_info"].value_counts().to_dict()
-agg["avg_route_popularity"] = grouped["flight_code"].apply(
-    lambda x: np.mean(df.loc[x.index, "route_freq"])
-).values
-agg["avg_agent_popularity"] = grouped["agent_info"].apply(
-    lambda x: np.mean([agent_counts.get(a, 0) for a in x])
-).values
 
-# ==================================================
-# 2. МОДЕЛЬ Isolation Forest
-# ==================================================
+agent_popularity = []
+for name, group in grouped:
+    pop_sum = 0
+    count = 0
+    for agent in group["agent_info"]:
+        pop_sum += agent_counts.get(agent, 0)
+        count += 1
+    agent_popularity.append(pop_sum / count if count > 0 else 0)
+
+agg["avg_agent_popularity"] = agent_popularity
+
+# модель
 features = agg.drop(columns=["first_name", "last_name", "pax_birth_data"]).fillna(0)
 
-# Нормализация
 scaler = StandardScaler()
 features_scaled = scaler.fit_transform(features)
 
-# Isolation Forest
 model = IsolationForest(
     n_estimators=300,
-    contamination=0.02,  # ожидаем 2% аномалий
+    contamination=0.02,
     random_state=42
 )
 model.fit(features_scaled)
 
 agg["anomaly_score"] = model.decision_function(features_scaled)
-agg["is_suspicious"] = model.predict(features_scaled)  # -1 = аномалия
+agg["is_suspicious"] = model.predict(features_scaled)
 
-# ==================================================
-# 3. ПОЯСНЕНИЕ “ПОЧЕМУ ПОДОЗРИТЕЛЕН”
-# ==================================================
-def explain(row):
+# объяснения
+reasons_list = []
+for i, row in agg.iterrows():
     reasons = []
     if row["n_unique_documents"] > 1:
-        reasons.append(f"использовал {int(row['n_unique_documents'])} разных документов")
+        reasons.append(f"{int(row['n_unique_documents'])} документов")
     if row["flights_per_month"] > 10:
-        reasons.append("чрезмерная частота перелётов")
+        reasons.append("часто летает")
     if row["baggage_ratio"] < 0.2 and row["n_flights_total"] > 5:
-        reasons.append("частые рейсы без багажа")
+        reasons.append("нет багажа")
     if row["missing_ratio"] > 0.3:
-        reasons.append("много пропусков в данных")
+        reasons.append("пропуски в данных")
     if row["n_unique_agents"] > 5:
-        reasons.append("использует много агентств продаж")
-    if not reasons:
-        reasons.append("аномалия по совокупности признаков")
-    return "; ".join(reasons)
+        reasons.append("много агентов")
+    if len(reasons) == 0:
+        reasons.append("странное поведение")
+    reasons_list.append("; ".join(reasons))
 
-agg["reason"] = agg.apply(explain, axis=1)
+agg["reason"] = reasons_list
 
-# ==================================================
-# 4. ВЫВОД И СОХРАНЕНИЕ
-# ==================================================
+# результаты
 suspects = agg[agg["is_suspicious"] == -1].sort_values("anomaly_score")
 
-print(f"\n🚨 Найдено подозрительных личностей: {len(suspects)} / {len(agg)}")
+print(f"нашли {len(suspects)} подозрительных")
 print(suspects[[
     "first_name", "last_name", "pax_birth_data",
     "n_unique_documents", "n_flights_total", "flights_per_month",
@@ -122,7 +147,6 @@ print(suspects[[
     "missing_ratio", "reason", "anomaly_score"
 ]].head(15).to_string(index=False))
 
-# Сохранение отчёта
-out_path = r"/home/mariia/Загрузки/Telegram Desktop/AI2/suspicious_passengers_detailed.csv"
-agg.to_csv(out_path, index=False, encoding="utf-8")
-print(f"\n💾 Отчёт сохранён → {out_path}")
+# сохраняем
+agg.to_csv(r"/home/mariia/Загрузки/Telegram Desktop/AI2/suspicious_passengers_detailed.csv", index=False, encoding="utf-8")
+print("сохранено в suspicious_passengers_detailed.csv")
