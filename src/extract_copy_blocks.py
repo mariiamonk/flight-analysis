@@ -2,59 +2,63 @@ import re
 import pandas as pd
 import chardet
 from pathlib import Path
-import sys, os
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT))
-import srс.settings as cfg
 
+input_file = "data.txt"
+output_folder = "data_staging"
 
-input_path = cfg.RAW / "data.txt"       # твой дамп
-output_dir = cfg.STAGING
-output_dir.mkdir(parents=True, exist_ok=True)
+# читаем файл и определяем кодировку
+with open(input_file, 'rb') as f:
+    data = f.read(200000)
+    enc = chardet.detect(data)['encoding']
+    if not enc:
+        enc = 'utf-8'
 
-# === 1. Определяем кодировку ===
-with open(input_path, "rb") as f:
-    enc = chardet.detect(f.read(200000))["encoding"] or "utf-8"
-
-# === 2. Читаем весь файл ===
-with open(input_path, "r", encoding=enc, errors="ignore") as f:
+with open(input_file, 'r', encoding=enc, errors='ignore') as f:
     text = f.read()
 
-# === 3. Находим все COPY-блоки ===
-pattern = re.compile(
-    r"COPY\s+([\w\.]+)\s*\(([^)]+)\)\s+FROM\s+stdin;\s*(.*?)\n\\\.",
-    re.DOTALL | re.IGNORECASE,
-)
-matches = pattern.findall(text)
+pattern = r"COPY\s+(\w+\.\w+)\s*\(([^)]+)\)\s+FROM\s+stdin;\s*(.*?)\n\\\."
+matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
 
-print(f"📦 Найдено таблиц: {len(matches)}")
+print(f"нашли таблиц: {len(matches)}")
 
-for table_name, columns, rows in matches:
-    cols = [c.strip() for c in columns.split(",")]
-    lines = [line.strip() for line in rows.strip().split("\n") if line.strip()]
-
-    parsed_rows = []
-    for line in lines:
-        parts = line.split("\t")
-        parsed_rows.append([None if p == r"\N" else p for p in parts])
-
-    # 💡 Пропускаем пустые таблицы
-    if not parsed_rows:
-        print(f"⚠️ {table_name}: пропущено (нет данных)")
+for table, columns, data_part in matches:
+    # колонки
+    cols = [c.strip() for c in columns.split(',')]
+    
+    # строки данных
+    lines = data_part.strip().split('\n')
+    lines = [line.strip() for line in lines if line.strip()]
+    
+    if not lines:
+        print(f"пропуск {table} - нет данных")
         continue
+    
+    # парсим данные
+    rows = []
+    for line in lines:
+        parts = line.split('\t')
+        row = [None if p == r'\N' else p for p in parts]
+        rows.append(row)
+    
+    # выравниваем количество колонок
+    max_cols = max(len(r) for r in rows)
+    if len(cols) > max_cols:
+        cols = cols[:max_cols]
+    elif len(cols) < max_cols:
+        for i in range(len(cols), max_cols):
+            cols.append(f'col{i+1}')
+    
+    # создаем датафрейм
+    df = pd.DataFrame(rows, columns=cols)
+    
+    # сохраняем
+    out_name = table.replace('.', '_') + '.csv'
+    out_path = Path(output_folder) / out_name
+    out_path.parent.mkdir(exist_ok=True)
+    
+    df.to_csv(out_path, index=False)
+    
+    print(f"{table}: {len(df)} строк -> {out_path}")
 
-    # 💡 Исправляем несоответствие количества колонок и данных
-    max_len = max(len(p) for p in parsed_rows)
-    if len(cols) < max_len:
-        cols += [f"extra_{i}" for i in range(len(cols)+1, max_len+1)]
-    elif len(cols) > max_len:
-        cols = cols[:max_len]
+print("готово")
 
-    df = pd.DataFrame(parsed_rows, columns=cols)
-    csv_path = output_dir / f"{table_name.replace('.', '_')}.csv"
-    df.to_csv(csv_path, index=False, encoding="utf-8")
-
-    print(f"✅ {table_name}: {len(df)} строк → {csv_path}")
-
-
-print("🎉 Готово! Все таблицы сохранены в data_staging/")
