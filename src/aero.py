@@ -9,21 +9,17 @@ from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import warnings
 warnings.filterwarnings('ignore')
 
-# Настройка стиля
 plt.style.use('default')
 sns.set_palette("dark:blue")
 
 class OptimizedFlightMapVisualizer:
-    """Оптимизированный класс для визуализации перелетов"""
     
     def __init__(self):
         self.geolocator = Nominatim(user_agent="flight_analysis_optimized")
         self.airport_coords = {}
-        # Загружаем заранее известные координаты популярных аэропортов
         self.load_common_airports()
     
     def load_common_airports(self):
-        """Предзагружаем координаты популярных аэропортов"""
         common_airports = {
             'Moscow': (55.7558, 37.6173),
             'London': (51.5074, -0.1278),
@@ -49,17 +45,14 @@ class OptimizedFlightMapVisualizer:
         self.airport_coords.update(common_airports)
     
     def fast_geocode_airport(self, airport_name):
-        """Быстрое геокодирование с использованием кэша и эвристик"""
         if airport_name in self.airport_coords:
             return self.airport_coords[airport_name]
         
-        # Пробуем найти в кэше по частичному совпадению
         for known_airport, coords in self.airport_coords.items():
             if known_airport.lower() in airport_name.lower() or airport_name.lower() in known_airport.lower():
                 self.airport_coords[airport_name] = coords
                 return coords
         
-        # Если не нашли в кэше, пробуем геокодировать
         try:
             location = self.geolocator.geocode(airport_name + " airport", timeout=10)
             if location:
@@ -72,64 +65,55 @@ class OptimizedFlightMapVisualizer:
         return None
     
     def prepare_optimized_data(self, df, sample_size=None):
-        """Оптимизированная подготовка данных"""
-        print("🔍 Оптимизированная подготовка данных...")
+        print("Подготовка данных")
         
-        # Если указан размер выборки, берем случайную выборку
         if sample_size and len(df) > sample_size:
             df = df.sample(sample_size)
-            print(f"📊 Взята выборка: {sample_size} перелетов")
+            print(f"Выборка: {sample_size} перелетов")
         
         flight_data = df.copy()
         
-        # Быстрое преобразование текстовых колонок
         text_columns = ['departure', 'arrival']
         for col in text_columns:
             if col in flight_data.columns:
                 flight_data[col] = flight_data[col].astype(str).replace('nan', '')
         
-        # Фильтруем только корректные данные
         if 'departure' in flight_data.columns and 'arrival' in flight_data.columns:
             mask = (flight_data['departure'] != '') & (flight_data['arrival'] != '')
             flight_data = flight_data[mask]
         
-        print(f"📊 Обработано перелетов: {len(flight_data)}")
+        print(f"Обработано перелетов: {len(flight_data)}")
         return flight_data
     
     def create_optimized_coordinates(self, flight_data, max_airports=200):
-        """Оптимизированное создание координат аэропортов"""
-        print("🗺️ Оптимизированное создание координат аэропортов...")
+        print("Создание координат аэропортов")
         
-        # Собираем уникальные аэропорты
         all_airports = set()
         if 'departure' in flight_data.columns:
             all_airports.update(flight_data['departure'].unique())
         if 'arrival' in flight_data.columns:
             all_airports.update(flight_data['arrival'].unique())
         
-        print(f"🔍 Найдено уникальных аэропортов: {len(all_airports)}")
+        print(f"Уникальных аэропортов: {len(all_airports)}")
         
-        # Ограничиваем количество аэропортов для геокодирования
         if len(all_airports) > max_airports:
-            print(f"⚠️  Ограничиваем геокодирование до {max_airports} самых частых аэропортов")
+            print(f"Ограничение геокодирования до {max_airports} аэропортов")
             
-            # Считаем частоту аэропортов
             airport_counts = {}
             for airport in all_airports:
                 dep_count = len(flight_data[flight_data['departure'] == airport])
                 arr_count = len(flight_data[flight_data['arrival'] == airport])
                 airport_counts[airport] = dep_count + arr_count
             
-            # Берем топ-N самых частых аэропортов
             top_airports = sorted(airport_counts.items(), key=lambda x: x[1], reverse=True)[:max_airports]
             all_airports = set([airport for airport, count in top_airports])
         
-        print("📍 Быстрое получение координат аэропортов...")
+        print("Получение координат...")
         
         airport_data = []
         for i, airport in enumerate(all_airports):
             if i % 10 == 0:
-                print(f"📍 Обработано {i}/{len(all_airports)} аэропортов...")
+                print(f"Обработано {i}/{len(all_airports)}...")
                 
             coords = self.fast_geocode_airport(airport)
             if coords:
@@ -144,13 +128,10 @@ class OptimizedFlightMapVisualizer:
         return pd.DataFrame(airport_data)
     
     def create_fast_world_map(self, flight_data, airport_df):
-        """Быстрое создание карты мира"""
-        print("🌍 Быстрое создание карты мира...")
+        print("Создание карты мира")
         
-        # Создаем карту
         fig = go.Figure()
         
-        # Добавляем аэропорты
         fig.add_trace(go.Scattergeo(
             lon=airport_df['lon'],
             lat=airport_df['lat'],
@@ -165,25 +146,21 @@ class OptimizedFlightMapVisualizer:
             name='Аэропорты'
         ))
         
-        # Быстро добавляем перелеты - ограничиваем количество для производительности
-        print("✈️  Быстрое добавление перелетов...")
+        print("Добавление перелетов")
         
-        # Группируем маршруты для уменьшения количества линий
         if len(flight_data) > 5000:
-            print("🔄 Группируем маршруты для оптимизации...")
+            print("Группировка маршрутов")
             route_counts = flight_data.groupby(['departure', 'arrival']).size().reset_index()
             route_counts.columns = ['departure', 'arrival', 'count']
-            # Берем топ маршрутов
             top_routes = route_counts.nlargest(2000, 'count')
             flight_data_to_use = top_routes
         else:
             flight_data_to_use = flight_data
         
-        # Добавляем линии перелетов
         flight_lines = []
         for i, (_, flight) in enumerate(flight_data_to_use.iterrows()):
             if i % 1000 == 0:
-                print(f"✈️  Обработано {i}/{len(flight_data_to_use)} перелетов...")
+                print(f"Обработано {i}/{len(flight_data_to_use)}...")
                 
             dep_airport = flight['departure']
             arr_airport = flight['arrival']
@@ -200,11 +177,9 @@ class OptimizedFlightMapVisualizer:
                     'route': f"{dep_airport} → {arr_airport}"
                 })
         
-        print(f"✅ Создано {len(flight_lines)} линий перелетов")
+        print(f"Создано линий: {len(flight_lines)}")
         
-        # Используем более эффективный способ добавления линий
         if flight_lines:
-            # Создаем массивы координат для всех линий
             lons = []
             lats = []
             
@@ -212,7 +187,6 @@ class OptimizedFlightMapVisualizer:
                 lons.extend([line['dep_lon'], line['arr_lon'], None])
                 lats.extend([line['dep_lat'], line['arr_lat'], None])
             
-            # Добавляем все линии одним trace
             fig.add_trace(go.Scattergeo(
                 lon=lons,
                 lat=lats,
@@ -222,9 +196,8 @@ class OptimizedFlightMapVisualizer:
                 showlegend=False
             ))
         
-        # Настройка карты
         fig.update_layout(
-            title_text='🌍 ОПТИМИЗИРОВАННАЯ КАРТА ПЕРЕЛЕТОВ<br><sub>Самые популярные маршруты</sub>',
+            title_text='КАРТА ПЕРЕЛЕТОВ',
             showlegend=True,
             geo=dict(
                 scope='world',
@@ -238,41 +211,35 @@ class OptimizedFlightMapVisualizer:
             )
         )
         
-        # Сохраняем карту
         output_path = "/home/mariia/Загрузки/Telegram Desktop/AI2/world_flights_OPTIMIZED.html"
         fig.write_html(output_path)
-        print(f"✅ Оптимизированная карта сохранена: {output_path}")
+        print(f"Карта сохранена: {output_path}")
         
         return fig
 
 def main():
-    """Главная функция программы"""
-    print("🌍 ОПТИМИЗИРОВАННАЯ ПРОГРАММА ВИЗУАЛИЗАЦИИ ПЕРЕЛЕТОВ")
-    print("=" * 60)
+    print("ПРОГРАММА ВИЗУАЛИЗАЦИИ ПЕРЕЛЕТОВ")
     
-    # Загрузка данных
     try:
         df = pd.read_csv(r"/home/mariia/Загрузки/Telegram Desktop/AI2/data_staging/merged_all_detailed.csv", low_memory=False)
-        print(f"✅ Загружено {len(df):,} строк данных")
+        print(f"Загружено строк: {len(df)}")
     except FileNotFoundError:
-        print("❌ Файл данных не найден")
+        print("Файл не найден")
         return
     
-    # Создаем оптимизированный визуализатор
     visualizer = OptimizedFlightMapVisualizer()
     
-    # Запрашиваем у пользователя настройки
-    print("\n⚡ НАСТРОЙКИ ОПТИМИЗАЦИИ:")
-    print("1. 🔥 Максимальная скорость (1000 перелетов)")
-    print("2. ⚡ Баланс скорости и качества (5000 перелетов)") 
-    print("3. 🎯 Хорошее качество (10000 перелетов)")
-    print("4. 🚀 Все данные (может быть медленно)")
+    print("НАСТРОЙКИ:")
+    print("1. 1000 перелетов")
+    print("2. 5000 перелетов")
+    print("3. 10000 перелетов")
+    print("4. Все данные")
     
-    choice = input("\nВыберите вариант (1-4): ").strip()
+    choice = input("Выберите вариант (1-4): ").strip()
     
     sample_sizes = {
         '1': 1000,
-        '2': 5000, 
+        '2': 5000,
         '3': 10000,
         '4': None
     }
@@ -280,36 +247,31 @@ def main():
     sample_size = sample_sizes.get(choice, 5000)
     
     if sample_size:
-        print(f"📊 Будет использована выборка: {sample_size} перелетов")
+        print(f"Выборка: {sample_size} перелетов")
     else:
-        print("📊 Будут использованы все данные (может занять много времени)")
+        print("Используются все данные")
     
-    # Подготавливаем данные
     flight_data = visualizer.prepare_optimized_data(df, sample_size=sample_size)
     
     if len(flight_data) == 0:
-        print("❌ Нет данных о перелетах для визуализации")
+        print("Нет данных для визуализации")
         return
     
-    # Создаем координаты аэропортов
     airport_df = visualizer.create_optimized_coordinates(flight_data, max_airports=150)
     
     if len(airport_df) == 0:
-        print("❌ Не удалось получить координаты аэропортов")
+        print("Не удалось получить координаты")
         return
     
-    print(f"✅ Получены координаты для {len(airport_df)} аэропортов")
+    print(f"Координаты для {len(airport_df)} аэропортов")
     
-    # Создаем оптимизированную карту
-    print("\n🚀 ЗАПУСК СОЗДАНИЯ ОПТИМИЗИРОВАННОЙ КАРТЫ...")
+    print("Создание карты")
     visualizer.create_fast_world_map(flight_data, airport_df)
     
-    print("\n🎉 ОПТИМИЗИРОВАННАЯ ВИЗУАЛИЗАЦИЯ ЗАВЕРШЕНА!")
-    print("📊 СТАТИСТИКА:")
-    print(f"   - Обработано перелетов: {len(flight_data)}")
-    print(f"   - Уникальных аэропортов: {len(airport_df)}")
-    print(f"   - Файл карты: /home/mariia/Загрузки/Telegram Desktop/AI2/world_flights_OPTIMIZED.html")
-    print(f"   - Координаты аэропортов в кэше: {len(visualizer.airport_coords)}")
+    print("ВИЗУАЛИЗАЦИЯ ЗАВЕРШЕНА")
+    print(f"Перелетов: {len(flight_data)}")
+    print(f"Аэропортов: {len(airport_df)}")
+    print(f"Файл карты: /home/mariia/Загрузки/Telegram Desktop/AI2/world_flights_OPTIMIZED.html")
 
 if __name__ == "__main__":
     main()
