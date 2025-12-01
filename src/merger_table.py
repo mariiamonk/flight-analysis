@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest
@@ -150,3 +149,4 @@ print(suspects[[
 # сохраняем
 agg.to_csv(r"/home/mariia/Загрузки/Telegram Desktop/AI2/suspicious_passengers_detailed.csv", index=False, encoding="utf-8")
 print("сохранено в suspicious_passengers_detailed.csv")
+
